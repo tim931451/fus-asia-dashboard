@@ -294,7 +294,7 @@ tab1, tab2, tab3, tab4, tab8, tab5, tab6, tab9, tab7 = st.tabs([
 # ===== TAB 1: Bestellungen Timeseries =====
 with tab1:
     if filtered.empty:
-        st.warning("Keine Daten fuer diesen Filter.")
+        st.warning("Keine Daten für diesen Filter.")
     else:
         metric_choice = st.radio("Metrik", ["Bestellungen", "Umsatz"], horizontal=True, key="ts_metric")
         y_col = "orders_cnt" if metric_choice == "Bestellungen" else "orders_value_sum"
@@ -325,12 +325,12 @@ with tab1:
         daily["rolling_7"] = daily[y_col].rolling(7, min_periods=1).mean()
         fig2 = go.Figure()
         fig2.add_trace(go.Scatter(x=daily["weather_date"], y=daily[y_col],
-                                   mode="lines", name="Taeglich", opacity=0.25,
+                                   mode="lines", name="Täglich", opacity=0.25,
                                    line=dict(color=PRIMARY)))
         fig2.add_trace(go.Scatter(x=daily["weather_date"], y=daily["rolling_7"],
                                    mode="lines", name="7-Tage Schnitt",
                                    line=dict(width=3, color=SECONDARY)))
-        fig2.update_layout(title=f"Taegliche {metric_choice} (mit 7-Tage Schnitt)",
+        fig2.update_layout(title=f"Tägliche {metric_choice} (mit 7-Tage Schnitt)",
                            xaxis_title="Datum", yaxis_title=metric_choice,
                            plot_bgcolor="white", paper_bgcolor="white",
                            xaxis=dict(showgrid=False), yaxis=dict(gridcolor="#f0f0f0"),
@@ -340,7 +340,7 @@ with tab1:
 # ===== TAB 2: Monatlicher Umsatz =====
 with tab2:
     if filtered.empty:
-        st.warning("Keine Daten fuer diesen Filter.")
+        st.warning("Keine Daten für diesen Filter.")
     else:
         rev = filtered[filtered["orders_value_sum"].notna() & (filtered["orders_value_sum"] > 0)].copy()
         monthly_rev = (
@@ -373,7 +373,7 @@ with tab2:
 # ===== TAB 3: Temperatur vs. Umsatz =====
 with tab3:
     if filtered.empty:
-        st.warning("Keine Daten fuer diesen Filter.")
+        st.warning("Keine Daten für diesen Filter.")
     else:
         scatter_y = st.radio("Y-Achse", ["Umsatz", "Bestellungen"], horizontal=True, key="scatter_y")
         y_col_s = "orders_value_sum" if scatter_y == "Umsatz" else "orders_cnt"
@@ -413,7 +413,7 @@ with tab4:
     col2.metric("Regen (Median)", f"{rain_vals.median():.0f}", f"n = {len(rain_vals)}")
 
     # Weekday breakdown
-    st.subheader("Aufschluesselung nach Wochentag")
+    st.subheader("Aufschlüsselung nach Wochentag")
     box_df["Wochentag"] = box_df["weekday"].map(WEEKDAY_NAMES)
     fig2 = px.box(box_df, x="Wochentag", y=y_col_b, color="Wetter",
                   color_discrete_map={"Regen": RAIN_COL, "Trocken": DRY_COL},
@@ -585,7 +585,7 @@ with tab6:
         wd_idx = WEEKDAY_OPTIONS.index(fi_model)
         key = f"wd_{wd_idx}"
         if key not in models:
-            st.warning(f"Kein Modell fuer {fi_model}")
+            st.warning(f"Kein Modell für {fi_model}")
             st.stop()
         m = models[key]
         cols = model_meta["feature_cols_weekday"]
@@ -633,10 +633,10 @@ with tab6:
 
 # ===== TAB 9: Prognose heute =====
 with tab9:
-    st.subheader("Bestellprognose fuer heute")
+    st.subheader("Bestellprognose für heute")
 
     today = datetime.now().date()
-    st.info(f"Prognose fuer: **{today.strftime('%A, %d.%m.%Y')}**")
+    st.info(f"Prognose für: **{today.strftime('%A, %d.%m.%Y')}**")
 
     # Fetch today's weather from Open-Meteo
     @st.cache_data(ttl=1800)
@@ -665,7 +665,7 @@ with tab9:
     else:
         today_row = weather_today[weather_today["time"].dt.date == today]
         if today_row.empty:
-            st.error(f"Keine Wetterdaten fuer {today} verfuegbar.")
+            st.error(f"Keine Wetterdaten für {today} verfügbar.")
         else:
             tw = today_row.iloc[0]
             t_temp = float(tw.get("temperature_2m_mean", 0) or 0)
@@ -724,24 +724,36 @@ with tab9:
 
             st.divider()
             p1, p2 = st.columns(2)
-            p1.metric("🤖 Globales Modell", f"{pred_today_g:.0f} Bestellungen")
+            p1.metric("🤖 Alle-Tage-Modell", f"{pred_today_g:.0f} Bestellungen")
             if pred_today_wd is not None:
-                p2.metric(f"📅 {WEEKDAY_NAMES[t_wd]}-Modell", f"{pred_today_wd:.0f} Bestellungen")
+                p2.metric(f"📅 Nur-{WEEKDAY_NAMES[t_wd]}-Modell", f"{pred_today_wd:.0f} Bestellungen")
 
-            # Counterfactual
+            # Counterfactual – nutzt Tagesmodell wenn vorhanden
             st.divider()
-            st.subheader("Was waere wenn?")
-            feat_t_rain = feat_today_g.copy()
+            st.subheader("Was wäre wenn?")
+            feat_t_rain = feat_today_wd.copy()
             feat_t_rain["is_rain"] = 1
-            feat_t_dry = feat_today_g.copy()
+            feat_t_dry = feat_today_wd.copy()
             feat_t_dry["is_rain"] = 0
 
-            X_t_rain = pd.DataFrame([feat_t_rain])[model_meta["feature_cols_global"]]
-            X_t_dry = pd.DataFrame([feat_t_dry])[model_meta["feature_cols_global"]]
+            if wd_key_t in models:
+                cf_model = models[wd_key_t]
+                cf_cols = model_meta["feature_cols_weekday"]
+                cf_label = f"{WEEKDAY_NAMES[t_wd]}-Modell"
+            else:
+                cf_model = models["global"]
+                cf_cols = model_meta["feature_cols_global"]
+                cf_label = "Alle-Tage-Modell"
+                feat_t_rain = feat_today_g.copy(); feat_t_rain["is_rain"] = 1
+                feat_t_dry = feat_today_g.copy(); feat_t_dry["is_rain"] = 0
 
-            pred_t_rain = max(0, float(models["global"].predict(X_t_rain)[0]))
-            pred_t_dry = max(0, float(models["global"].predict(X_t_dry)[0]))
+            X_t_rain = pd.DataFrame([feat_t_rain])[cf_cols]
+            X_t_dry = pd.DataFrame([feat_t_dry])[cf_cols]
 
+            pred_t_rain = max(0, float(cf_model.predict(X_t_rain)[0]))
+            pred_t_dry = max(0, float(cf_model.predict(X_t_dry)[0]))
+
+            st.caption(f"Berechnung mit dem **{cf_label}**")
             c1, c2, c3 = st.columns(3)
             c1.metric("🌧️ Bei Regen", f"{pred_t_rain:.0f}")
             c2.metric("☀️ Bei Trocken", f"{pred_t_dry:.0f}")
@@ -753,15 +765,15 @@ with tab9:
             if days_old_t > 3:
                 st.warning(
                     f"Die Daten sind {days_old_t} Tage alt (letzter Eintrag: {last_date_t}). "
-                    "Lag-Features koennten ungenau sein."
+                    "Lag-Features könnten ungenau sein."
                 )
 
 # ===== TAB 7: Prognose morgen =====
 with tab7:
-    st.subheader("Bestellprognose fuer morgen")
+    st.subheader("Bestellprognose für morgen")
 
     tomorrow = datetime.now().date() + timedelta(days=1)
-    st.info(f"Prognose fuer: **{tomorrow.strftime('%A, %d.%m.%Y')}**")
+    st.info(f"Prognose für: **{tomorrow.strftime('%A, %d.%m.%Y')}**")
 
     # Fetch forecast from Open-Meteo
     @st.cache_data(ttl=3600)
@@ -790,7 +802,7 @@ with tab7:
     else:
         tmrw_row = forecast[forecast["time"].dt.date == tomorrow]
         if tmrw_row.empty:
-            st.error(f"Keine Vorhersage fuer {tomorrow} verfuegbar.")
+            st.error(f"Keine Vorhersage für {tomorrow} verfügbar.")
         else:
             tmrw = tmrw_row.iloc[0]
             temp = float(tmrw.get("temperature_2m_mean", 0) or 0)
@@ -853,28 +865,40 @@ with tab7:
 
             # Display predictions
             p1, p2 = st.columns(2)
-            p1.metric("Globales Modell", f"{pred_global:.0f} Bestellungen")
+            p1.metric("🤖 Alle-Tage-Modell", f"{pred_global:.0f} Bestellungen")
             if pred_weekday is not None:
-                p2.metric(f"{WEEKDAY_NAMES[wd]}-Modell", f"{pred_weekday:.0f} Bestellungen")
+                p2.metric(f"📅 Nur-{WEEKDAY_NAMES[wd]}-Modell", f"{pred_weekday:.0f} Bestellungen")
 
-            # Counterfactual: what if rain / no rain?
+            # Counterfactual – nutzt Tagesmodell wenn vorhanden
             st.divider()
-            st.subheader("Was waere wenn?")
+            st.subheader("Was wäre wenn?")
 
-            feat_rain = feat_global.copy()
-            feat_rain["is_rain"] = 1
-            feat_dry = feat_global.copy()
-            feat_dry["is_rain"] = 0
+            feat_rain_wd = feat_wd.copy()
+            feat_rain_wd["is_rain"] = 1
+            feat_dry_wd = feat_wd.copy()
+            feat_dry_wd["is_rain"] = 0
 
-            X_rain = pd.DataFrame([feat_rain])[model_meta["feature_cols_global"]]
-            X_dry = pd.DataFrame([feat_dry])[model_meta["feature_cols_global"]]
+            if wd_key in models:
+                cf_model_m = models[wd_key]
+                cf_cols_m = model_meta["feature_cols_weekday"]
+                cf_label_m = f"{WEEKDAY_NAMES[wd]}-Modell"
+            else:
+                cf_model_m = models["global"]
+                cf_cols_m = model_meta["feature_cols_global"]
+                cf_label_m = "Alle-Tage-Modell"
+                feat_rain_wd = feat_global.copy(); feat_rain_wd["is_rain"] = 1
+                feat_dry_wd = feat_global.copy(); feat_dry_wd["is_rain"] = 0
 
-            pred_rain = max(0, float(models["global"].predict(X_rain)[0]))
-            pred_dry = max(0, float(models["global"].predict(X_dry)[0]))
+            X_rain = pd.DataFrame([feat_rain_wd])[cf_cols_m]
+            X_dry = pd.DataFrame([feat_dry_wd])[cf_cols_m]
 
+            pred_rain = max(0, float(cf_model_m.predict(X_rain)[0]))
+            pred_dry = max(0, float(cf_model_m.predict(X_dry)[0]))
+
+            st.caption(f"Berechnung mit dem **{cf_label_m}**")
             c1, c2, c3 = st.columns(3)
-            c1.metric("Bei Regen", f"{pred_rain:.0f}")
-            c2.metric("Bei Trocken", f"{pred_dry:.0f}")
+            c1.metric("🌧️ Bei Regen", f"{pred_rain:.0f}")
+            c2.metric("☀️ Bei Trocken", f"{pred_dry:.0f}")
             c3.metric("Differenz", f"{pred_rain - pred_dry:+.1f}")
 
             # Data freshness warning
@@ -883,5 +907,5 @@ with tab7:
             if days_old > 3:
                 st.warning(
                     f"Die Daten sind {days_old} Tage alt (letzter Eintrag: {last_date}). "
-                    "Lag-Features koennten ungenau sein. Bitte Pipeline neu ausfuehren."
+                    "Lag-Features könnten ungenau sein. Bitte Pipeline neu ausführen."
                 )
