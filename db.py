@@ -26,5 +26,4 @@ def _engine(prefix: str):
     return create_engine(url, pool_pre_ping=True)
 
 
-LOCAL = _engine("LOCAL_DB")
 REMOTE = _engine("REMOTE_DB")

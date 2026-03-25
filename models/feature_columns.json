@@ -1,0 +1,33 @@
+{
+  "feature_cols_global": [
+    "temperature_2m_mean",
+    "windspeed_10m_max",
+    "is_rain",
+    "weathercode",
+    "sin_doy",
+    "cos_doy",
+    "is_public_holiday",
+    "is_school_holiday",
+    "lag_7",
+    "rolling_mean_7",
+    "wd_0",
+    "wd_1",
+    "wd_2",
+    "wd_3",
+    "wd_4",
+    "wd_5",
+    "wd_6"
+  ],
+  "feature_cols_weekday": [
+    "temperature_2m_mean",
+    "windspeed_10m_max",
+    "is_rain",
+    "weathercode",
+    "sin_doy",
+    "cos_doy",
+    "is_public_holiday",
+    "is_school_holiday",
+    "lag_7",
+    "rolling_mean_7"
+  ]
+}

@@ -12,7 +12,7 @@ df["orders_cnt"] = pd.to_numeric(df.get("orders_cnt"), errors="coerce")
 # Treat missing order counts as 0 (days with no orders)
 df["orders_cnt"] = df["orders_cnt"].fillna(0)
 
- # Drop rows without a valid date
+# Drop rows without a valid date
 df = df.dropna(subset=["weather_date"])
 
 # Ignore days with zero (or missing) order value sum

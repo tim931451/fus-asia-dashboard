@@ -37,6 +37,10 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     # Umsatz (für Filter/Debug; Target bleibt orders_cnt)
     df["orders_value_sum"] = pd.to_numeric(df.get("orders_value_sum"), errors="coerce")
 
+    # rain_sum aus precipitation_sum ableiten, falls nicht vorhanden
+    if "rain_sum" not in df.columns and "precipitation_sum" in df.columns:
+        df["rain_sum"] = df["precipitation_sum"]
+
     # Wetter numerisch
     weather_cols = [
         "temperature_2m_mean",

@@ -17,17 +17,18 @@ def time_series_split_75_25(df: pd.DataFrame):
 
 def fit_xgb(X_train, y_train, X_test, y_test):
     model = XGBRegressor(
-        objective="count:poisson",
+        objective="reg:squarederror",
         n_estimators=2500,
         learning_rate=0.03,
-        max_depth=6,
+        max_depth=4,
         subsample=0.8,
         colsample_bytree=0.8,
-        reg_lambda=1.0,
-        reg_alpha=0.0,
-        min_child_weight=1.0,
+        reg_lambda=2.0,
+        reg_alpha=0.5,
+        min_child_weight=5.0,
         random_state=42,
         n_jobs=-1,
+        early_stopping_rounds=50,
     )
     model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
     return model

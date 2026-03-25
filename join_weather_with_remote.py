@@ -1,6 +1,8 @@
 import pandas as pd
 from sqlalchemy import text
-from db import LOCAL, REMOTE  # so wie wir es vorher aufgebaut haben
+from db import REMOTE
+
+from weather import WEATHER_CSV
 
 
 REMOTE_TABLE = "vu_fuboxeat_ab_2021"
@@ -39,23 +41,10 @@ def pick_date_column(cols_df):
 
 
 def load_weather_local():
-    weather = pd.read_sql(
-        text("""
-            SELECT
-                weather_date,
-                temperature_2m_mean,
-                temperature_2m_max,
-                temperature_2m_min,
-                precipitation_sum,
-                windspeed_10m_max,
-                weathercode
-            FROM weather_basel_daily
-            WHERE weather_date >= '2023-01-01'
-            ORDER BY weather_date
-        """),
-        LOCAL
-    )
-    weather["weather_date"] = pd.to_datetime(weather["weather_date"])
+    """Liest Wetterdaten aus der CSV-Datei (erzeugt von weather.py)."""
+    weather = pd.read_csv(WEATHER_CSV)
+    weather["weather_date"] = pd.to_datetime(weather["weather_date"], errors="coerce")
+    weather = weather[weather["weather_date"] >= "2023-01-01"].sort_values("weather_date")
     return weather
 
 
@@ -85,8 +74,9 @@ def main():
     weather = load_weather_local()
     remote_daily = load_remote_daily(date_col)
 
-    # Join: Wetter links, Remote rechts (damit alle Wettertage drin bleiben)
-    df = weather.merge(remote_daily, left_on="weather_date", right_on="business_date", how="left")
+    # Join: nur Tage behalten, für die auch Bestelldaten existieren (inner join)
+    # Verhindert, dass Zukunftstage ohne Bestellungen als "0" ins Modell fliessen
+    df = weather.merge(remote_daily, left_on="weather_date", right_on="business_date", how="inner")
     df.drop(columns=["business_date"], inplace=True)
 
     print("\nJoined Result (head):")
