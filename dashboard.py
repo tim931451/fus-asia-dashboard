@@ -279,7 +279,7 @@ st.markdown(f"""
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab1, tab2, tab3, tab4, tab8, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab8, tab5, tab6, tab9, tab7 = st.tabs([
     "📈 Bestellungen",
     "💰 Monatlicher Umsatz",
     "🌡️ Temperatur vs. Umsatz",
@@ -287,6 +287,7 @@ tab1, tab2, tab3, tab4, tab8, tab5, tab6, tab7 = st.tabs([
     "🔗 Korrelationsmatrix",
     "🤖 Modell-Performance",
     "⭐ Feature Importance",
+    "📊 Prognose heute",
     "🔮 Prognose morgen",
 ])
 
@@ -629,6 +630,131 @@ with tab6:
                            labels={"value": "Delta Bestellungen (Regen - Kein Regen)"})
         fig.update_layout(showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
+
+# ===== TAB 9: Prognose heute =====
+with tab9:
+    st.subheader("Bestellprognose fuer heute")
+
+    today = datetime.now().date()
+    st.info(f"Prognose fuer: **{today.strftime('%A, %d.%m.%Y')}**")
+
+    # Fetch today's weather from Open-Meteo
+    @st.cache_data(ttl=1800)
+    def fetch_today_weather():
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            "?latitude=47.557117&longitude=7.549342"
+            "&daily=temperature_2m_mean,precipitation_sum,rain_sum,windspeed_10m_max,weathercode"
+            "&timezone=Europe/Zurich&forecast_days=1"
+        )
+        try:
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            daily = data["daily"]
+            fdf = pd.DataFrame(daily)
+            fdf["time"] = pd.to_datetime(fdf["time"])
+            return fdf
+        except Exception:
+            return None
+
+    weather_today = fetch_today_weather()
+
+    if weather_today is None:
+        st.error("Wetterdaten konnten nicht geladen werden.")
+    else:
+        today_row = weather_today[weather_today["time"].dt.date == today]
+        if today_row.empty:
+            st.error(f"Keine Wetterdaten fuer {today} verfuegbar.")
+        else:
+            tw = today_row.iloc[0]
+            t_temp = float(tw.get("temperature_2m_mean", 0) or 0)
+            t_wind = float(tw.get("windspeed_10m_max", 0) or 0)
+            t_rain = float(tw.get("rain_sum", 0) or 0)
+            t_wcode = float(tw.get("weathercode", 0) or 0)
+            t_is_rain = 1 if t_rain > 0 else 0
+
+            # Wetter anzeigen
+            w1, w2, w3, w4 = st.columns(4)
+            w1.metric("🌡️ Temperatur", f"{t_temp:.1f} °C")
+            w2.metric("💨 Wind", f"{t_wind:.1f} km/h")
+            w3.metric("🌧️ Regen", f"{t_rain:.1f} mm")
+            w4.metric("☁️ Wettercode", f"{int(t_wcode)}")
+
+            # Feature-Vektor bauen
+            t_wd = today.weekday()
+            t_doy = today.timetuple().tm_yday
+            t_sin_doy = np.sin(2 * np.pi * t_doy / 365.25)
+            t_cos_doy = np.cos(2 * np.pi * t_doy / 365.25)
+
+            ch_hol_today = country_holidays("CH", years=[today.year])
+            t_is_pub = 1 if today in ch_hol_today else 0
+            t_is_school = 1 if pd.Timestamp(today) in school_hols else 0
+
+            last_rows_t = df_feat.sort_values("date").tail(14)
+            t_lag_7 = float(last_rows_t["orders_cnt"].iloc[-7]) if len(last_rows_t) >= 7 else np.nan
+            t_roll_7 = float(last_rows_t["orders_cnt"].iloc[-7:].mean()) if len(last_rows_t) >= 7 else np.nan
+
+            # Global prediction
+            feat_today_g = {
+                "temperature_2m_mean": t_temp,
+                "windspeed_10m_max": t_wind,
+                "is_rain": t_is_rain,
+                "weathercode": t_wcode,
+                "sin_doy": t_sin_doy,
+                "cos_doy": t_cos_doy,
+                "is_public_holiday": t_is_pub,
+                "is_school_holiday": t_is_school,
+                "lag_7": t_lag_7,
+                "rolling_mean_7": t_roll_7,
+            }
+            for i in range(7):
+                feat_today_g[f"wd_{i}"] = (t_wd == i)
+
+            X_today_g = pd.DataFrame([feat_today_g])[model_meta["feature_cols_global"]]
+            pred_today_g = max(0, float(models["global"].predict(X_today_g)[0]))
+
+            # Weekday prediction
+            feat_today_wd = {k: v for k, v in feat_today_g.items() if not k.startswith("wd_")}
+            X_today_wd = pd.DataFrame([feat_today_wd])[model_meta["feature_cols_weekday"]]
+            wd_key_t = f"wd_{t_wd}"
+            pred_today_wd = None
+            if wd_key_t in models:
+                pred_today_wd = max(0, float(models[wd_key_t].predict(X_today_wd)[0]))
+
+            st.divider()
+            p1, p2 = st.columns(2)
+            p1.metric("🤖 Globales Modell", f"{pred_today_g:.0f} Bestellungen")
+            if pred_today_wd is not None:
+                p2.metric(f"📅 {WEEKDAY_NAMES[t_wd]}-Modell", f"{pred_today_wd:.0f} Bestellungen")
+
+            # Counterfactual
+            st.divider()
+            st.subheader("Was waere wenn?")
+            feat_t_rain = feat_today_g.copy()
+            feat_t_rain["is_rain"] = 1
+            feat_t_dry = feat_today_g.copy()
+            feat_t_dry["is_rain"] = 0
+
+            X_t_rain = pd.DataFrame([feat_t_rain])[model_meta["feature_cols_global"]]
+            X_t_dry = pd.DataFrame([feat_t_dry])[model_meta["feature_cols_global"]]
+
+            pred_t_rain = max(0, float(models["global"].predict(X_t_rain)[0]))
+            pred_t_dry = max(0, float(models["global"].predict(X_t_dry)[0]))
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("🌧️ Bei Regen", f"{pred_t_rain:.0f}")
+            c2.metric("☀️ Bei Trocken", f"{pred_t_dry:.0f}")
+            c3.metric("Differenz", f"{pred_t_rain - pred_t_dry:+.1f}")
+
+            # Data freshness
+            last_date_t = df_feat["date"].max().date()
+            days_old_t = (today - last_date_t).days
+            if days_old_t > 3:
+                st.warning(
+                    f"Die Daten sind {days_old_t} Tage alt (letzter Eintrag: {last_date_t}). "
+                    "Lag-Features koennten ungenau sein."
+                )
 
 # ===== TAB 7: Prognose morgen =====
 with tab7:
