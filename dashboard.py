@@ -16,6 +16,9 @@ from datetime import datetime, timedelta
 from holidays import country_holidays
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
+def _rmse(y_true, y_pred):
+    return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
@@ -58,18 +61,19 @@ html, body, [class*="css"] { font-family: 'Segoe UI', sans-serif; }
 .hero img { border-radius: 8px; }
 
 /* ---- KPI cards ---- */
-.kpi-row { display: flex; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+.kpi-row { display: flex; gap: 0.8rem; margin-bottom: 1.5rem; flex-wrap: nowrap; }
 .kpi-card {
-    flex: 1; min-width: 140px;
+    flex: 1; min-width: 0;
     background: white;
     border-radius: 12px;
-    padding: 1rem 1.2rem;
+    padding: 0.8rem 1rem;
     box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-    border-left: 5px solid #C0392B;
+    border-left: 4px solid #C0392B;
+    overflow: hidden;
 }
-.kpi-label { font-size: 0.75rem; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
-.kpi-value { font-size: 1.8rem; font-weight: 700; color: #2C3E50; line-height: 1.2; }
-.kpi-sub   { font-size: 0.8rem; color: #aaa; }
+.kpi-label { font-size: 0.65rem; color: #888; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap; }
+.kpi-value { font-size: 1.4rem; font-weight: 700; color: #2C3E50; line-height: 1.2; white-space: nowrap; }
+.kpi-sub   { font-size: 0.7rem; color: #aaa; white-space: nowrap; }
 
 /* ---- sidebar ---- */
 [data-testid="stSidebar"] { background: #2C3E50 !important; }
@@ -235,6 +239,7 @@ st.markdown(f"""
 _kdf = df_joined[df_joined["orders_value_sum"].notna() & (df_joined["orders_value_sum"] > 0)]
 total_orders   = int(df_joined["orders_cnt"].sum())
 total_revenue  = _kdf["orders_value_sum"].sum()
+_rev_fmt = f"{total_revenue/1_000_000:.1f}M" if total_revenue >= 1_000_000 else f"{total_revenue:,.0f}"
 avg_per_day    = df_joined["orders_cnt"].mean()
 best_wd_idx    = df_joined.groupby("weekday")["orders_cnt"].mean().idxmax()
 best_wd_name   = WEEKDAY_NAMES[best_wd_idx]
@@ -250,7 +255,7 @@ st.markdown(f"""
   </div>
   <div class="kpi-card">
     <div class="kpi-label">Gesamtumsatz</div>
-    <div class="kpi-value">CHF {total_revenue:,.0f}</div>
+    <div class="kpi-value">CHF {_rev_fmt}</div>
     <div class="kpi-sub">Summe Bestellwert</div>
   </div>
   <div class="kpi-card">
@@ -487,7 +492,7 @@ with tab5:
 
         pred = np.clip(models["global"].predict(X_test), 0, None)
         mae = mean_absolute_error(y_test, pred)
-        rmse = mean_squared_error(y_test, pred, squared=False)
+        rmse = _rmse(y_test, pred)
         denom = np.maximum(y_test.to_numpy(), 1)
         mape = np.mean(np.abs((y_test.to_numpy() - pred) / denom))
 
@@ -534,7 +539,7 @@ with tab5:
 
             p = np.clip(models[key].predict(X_te), 0, None)
             m = mean_absolute_error(y_te, p)
-            r = mean_squared_error(y_te, p, squared=False)
+            r = _rmse(y_te, p)
             d = np.maximum(y_te.to_numpy(), 1)
             mp = np.mean(np.abs((y_te.to_numpy() - p) / d))
 
