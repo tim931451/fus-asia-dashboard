@@ -102,20 +102,75 @@ hr { border-color: #eee; }
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Data loading (cached)
+# Data loading (cached) – Live-DB wenn verfügbar, sonst CSV-Fallback
 # ---------------------------------------------------------------------------
 
-@st.cache_data
+@st.cache_data(ttl=3600)  # 1h Cache, dann neu laden
 def load_joined():
+    df = _try_load_live()
+    if df is None:
+        df = _load_from_csv()
+    return df
+
+
+def _try_load_live():
+    """Versucht Bestellungen live aus DB + Wetter von API zu laden."""
+    try:
+        from db import REMOTE
+        from sqlalchemy import text
+
+        # Bestellungen aus DB
+        orders = pd.read_sql(text("""
+            SELECT DATE(datum) AS weather_date, COUNT(*) AS orders_cnt,
+                   COALESCE(SUM(gesamtbetrag), 0) AS orders_value_sum
+            FROM vu_fuboxeat_ab_2021
+            WHERE datum >= '2023-01-01'
+            GROUP BY DATE(datum)
+            ORDER BY weather_date
+        """), REMOTE)
+        orders["weather_date"] = pd.to_datetime(orders["weather_date"])
+
+        # Wetter von Open-Meteo (Archiv + Forecast)
+        today = datetime.now().date()
+        weather_url = (
+            "https://archive-api.open-meteo.com/v1/archive"
+            "?latitude=47.557117&longitude=7.549342"
+            "&start_date=2023-01-01"
+            f"&end_date={today.isoformat()}"
+            "&daily=temperature_2m_max,temperature_2m_min,temperature_2m_mean,"
+            "precipitation_sum,rain_sum,windspeed_10m_max,weathercode"
+            "&timezone=Europe/Zurich"
+        )
+        resp = requests.get(weather_url, timeout=30)
+        resp.raise_for_status()
+        w = pd.DataFrame(resp.json()["daily"])
+        w.rename(columns={"time": "weather_date"}, inplace=True)
+        w["weather_date"] = pd.to_datetime(w["weather_date"])
+
+        # Join
+        df = w.merge(orders, on="weather_date", how="inner")
+        df = _prepare_joined(df)
+        return df
+    except Exception:
+        return None
+
+
+def _load_from_csv():
+    """Fallback: CSV-Datei aus dem Repo laden."""
     df = pd.read_csv("weather_joined_remote_daily.csv")
     df["weather_date"] = pd.to_datetime(df["weather_date"], errors="coerce")
+    df = _prepare_joined(df)
+    return df
+
+
+def _prepare_joined(df):
+    """Gemeinsame Aufbereitung für Live- und CSV-Daten."""
     for c in ["orders_cnt", "orders_value_sum", "temperature_2m_mean",
               "windspeed_10m_max", "rain_sum", "precipitation_sum"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df.get(c), errors="coerce")
     df["orders_cnt"] = df["orders_cnt"].fillna(0)
     df = df.dropna(subset=["weather_date"]).sort_values("weather_date").reset_index(drop=True)
-    # rain flag
     rain = df["rain_sum"].copy()
     rain = rain.where(rain.notna(), df.get("precipitation_sum"))
     df["is_rain_day"] = (rain.fillna(0) > 0)
