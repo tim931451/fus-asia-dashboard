@@ -279,7 +279,7 @@ st.markdown(f"""
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab1, tab2, tab3, tab4, tab8, tab5, tab6, tab9, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab8, tab5, tab6, tab10, tab9, tab7 = st.tabs([
     "📈 Bestellungen",
     "💰 Monatlicher Umsatz",
     "🌡️ Temperatur vs. Umsatz",
@@ -287,6 +287,7 @@ tab1, tab2, tab3, tab4, tab8, tab5, tab6, tab9, tab7 = st.tabs([
     "🔗 Korrelationsmatrix",
     "🤖 Modell-Performance",
     "⭐ Feature Importance",
+    "📋 Gestern: Ist vs. Prognose",
     "📊 Prognose heute",
     "🔮 Prognose morgen",
 ])
@@ -630,6 +631,250 @@ with tab6:
                            labels={"value": "Delta Bestellungen (Regen - Kein Regen)"})
         fig.update_layout(showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# Helper: Prognose für ein beliebiges Datum berechnen
+# ---------------------------------------------------------------------------
+def _predict_for_date(target_date, weather_row, models, model_meta, df_feat, school_hols):
+    """Berechnet Global- und Wochentag-Prognose für ein Datum + Wetterdaten."""
+    wd = target_date.weekday()
+    doy = target_date.timetuple().tm_yday
+    sin_doy = np.sin(2 * np.pi * doy / 365.25)
+    cos_doy = np.cos(2 * np.pi * doy / 365.25)
+
+    ch_hol = country_holidays("CH", years=[target_date.year])
+    is_pub = 1 if target_date in ch_hol else 0
+    is_school = 1 if pd.Timestamp(target_date) in school_hols else 0
+
+    last_rows = df_feat.sort_values("date").tail(14)
+    lag_7 = float(last_rows["orders_cnt"].iloc[-7]) if len(last_rows) >= 7 else np.nan
+    roll_7 = float(last_rows["orders_cnt"].iloc[-7:].mean()) if len(last_rows) >= 7 else np.nan
+
+    feat = {
+        "temperature_2m_mean": float(weather_row.get("temperature_2m_mean", 0) or 0),
+        "windspeed_10m_max": float(weather_row.get("windspeed_10m_max", 0) or 0),
+        "is_rain": 1 if float(weather_row.get("rain_sum", 0) or 0) > 0 else 0,
+        "weathercode": float(weather_row.get("weathercode", 0) or 0),
+        "sin_doy": sin_doy,
+        "cos_doy": cos_doy,
+        "is_public_holiday": is_pub,
+        "is_school_holiday": is_school,
+        "lag_7": lag_7,
+        "rolling_mean_7": roll_7,
+    }
+
+    # Global
+    feat_g = feat.copy()
+    for i in range(7):
+        feat_g[f"wd_{i}"] = (wd == i)
+    X_g = pd.DataFrame([feat_g])[model_meta["feature_cols_global"]]
+    pred_global = max(0, float(models["global"].predict(X_g)[0]))
+
+    # Weekday
+    X_wd = pd.DataFrame([feat])[model_meta["feature_cols_weekday"]]
+    wd_key = f"wd_{wd}"
+    pred_weekday = None
+    if wd_key in models:
+        pred_weekday = max(0, float(models[wd_key].predict(X_wd)[0]))
+
+    return pred_global, pred_weekday, wd, feat, feat_g
+
+
+# ---------------------------------------------------------------------------
+# Helper: Tatsächliche Bestellungen aus DB oder CSV laden
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=600)
+def fetch_actual_orders(target_date_str):
+    """Versucht die tatsächlichen Bestellungen für ein Datum zu laden.
+    1. Versuch: Live-Abfrage der Remote-DB
+    2. Fallback: weather_joined_remote_daily.csv
+    """
+    target_date = pd.to_datetime(target_date_str).date()
+
+    # Versuch 1: DB
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        from db import REMOTE
+        from sqlalchemy import text
+
+        result = pd.read_sql(
+            text("""
+                SELECT COUNT(*) AS orders_cnt,
+                       COALESCE(SUM(gesamtbetrag), 0) AS orders_value_sum
+                FROM vu_fuboxeat_ab_2021
+                WHERE DATE(datum) = :d
+            """),
+            REMOTE,
+            params={"d": target_date_str},
+        )
+        if not result.empty and result.iloc[0]["orders_cnt"] > 0:
+            return {
+                "source": "Live-Datenbank",
+                "orders_cnt": int(result.iloc[0]["orders_cnt"]),
+                "orders_value_sum": float(result.iloc[0]["orders_value_sum"]),
+            }
+    except Exception:
+        pass
+
+    # Versuch 2: CSV
+    try:
+        csv = pd.read_csv("weather_joined_remote_daily.csv")
+        csv["weather_date"] = pd.to_datetime(csv["weather_date"])
+        row = csv[csv["weather_date"].dt.date == target_date]
+        if not row.empty:
+            return {
+                "source": "CSV-Datei",
+                "orders_cnt": int(row.iloc[0]["orders_cnt"]),
+                "orders_value_sum": float(row.iloc[0].get("orders_value_sum", 0)),
+            }
+    except Exception:
+        pass
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Helper: Wetter für ein vergangenes Datum holen (Open-Meteo Archive)
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=3600)
+def fetch_weather_for_date(target_date_str):
+    """Wetterdaten für ein bestimmtes Datum laden."""
+    target_date = pd.to_datetime(target_date_str).date()
+
+    # Zuerst aus CSV schauen
+    try:
+        csv = pd.read_csv("weather_joined_remote_daily.csv")
+        csv["weather_date"] = pd.to_datetime(csv["weather_date"])
+        row = csv[csv["weather_date"].dt.date == target_date]
+        if not row.empty:
+            return row.iloc[0].to_dict()
+    except Exception:
+        pass
+
+    # Fallback: Open-Meteo Archive API
+    try:
+        url = (
+            f"https://archive-api.open-meteo.com/v1/archive"
+            f"?latitude=47.557117&longitude=7.549342"
+            f"&start_date={target_date_str}&end_date={target_date_str}"
+            f"&daily=temperature_2m_mean,precipitation_sum,rain_sum,windspeed_10m_max,weathercode"
+            f"&timezone=Europe/Zurich"
+        )
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()["daily"]
+        return {
+            "temperature_2m_mean": data["temperature_2m_mean"][0],
+            "windspeed_10m_max": data["windspeed_10m_max"][0],
+            "rain_sum": data["rain_sum"][0],
+            "weathercode": data["weathercode"][0],
+        }
+    except Exception:
+        return None
+
+
+# ===== TAB 10: Gestern – Ist vs. Prognose =====
+with tab10:
+    st.subheader("Gestern: Vorhersage vs. Realität")
+
+    yesterday = datetime.now().date() - timedelta(days=1)
+    st.info(f"Auswertung für: **{yesterday.strftime('%A, %d.%m.%Y')}**")
+
+    # Tatsächliche Bestellungen laden
+    actual = fetch_actual_orders(str(yesterday))
+    weather_yest = fetch_weather_for_date(str(yesterday))
+
+    if weather_yest is None:
+        st.error(f"Keine Wetterdaten für {yesterday} verfügbar.")
+    elif actual is None:
+        st.warning(f"Keine Bestelldaten für {yesterday} gefunden. Evtl. war das Restaurant geschlossen oder die Daten sind noch nicht verfügbar.")
+    else:
+        # Wetter anzeigen
+        t_temp_y = float(weather_yest.get("temperature_2m_mean", 0) or 0)
+        t_wind_y = float(weather_yest.get("windspeed_10m_max", 0) or 0)
+        t_rain_y = float(weather_yest.get("rain_sum", 0) or 0)
+        t_wcode_y = float(weather_yest.get("weathercode", 0) or 0)
+
+        w1, w2, w3, w4 = st.columns(4)
+        w1.metric("🌡️ Temperatur", f"{t_temp_y:.1f} °C")
+        w2.metric("💨 Wind", f"{t_wind_y:.1f} km/h")
+        w3.metric("🌧️ Regen", f"{t_rain_y:.1f} mm")
+        w4.metric("☁️ Wettercode", f"{int(t_wcode_y)}")
+
+        # Prognose berechnen
+        pred_g_y, pred_wd_y, wd_y, _, _ = _predict_for_date(
+            yesterday, weather_yest, models, model_meta, df_feat, school_hols
+        )
+
+        actual_cnt = actual["orders_cnt"]
+        actual_rev = actual["orders_value_sum"]
+
+        st.divider()
+
+        # Grosser Vergleich
+        st.markdown("### 📊 Vergleich")
+
+        col_ist, col_global, col_tag = st.columns(3)
+
+        with col_ist:
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, #27ae60, #2ecc71); border-radius:12px; padding:1.5rem; text-align:center; color:white;">
+                <div style="font-size:0.8rem; opacity:0.8; text-transform:uppercase;">Tatsächlich (Ist)</div>
+                <div style="font-size:2.5rem; font-weight:800;">{actual_cnt}</div>
+                <div style="font-size:0.85rem; opacity:0.8;">Bestellungen</div>
+                <div style="font-size:0.75rem; margin-top:0.5rem;">CHF {actual_rev:,.0f} Umsatz</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col_global:
+            diff_g = pred_g_y - actual_cnt
+            pct_g = (diff_g / max(actual_cnt, 1)) * 100
+            color_g = "#e74c3c" if abs(pct_g) > 20 else "#f39c12" if abs(pct_g) > 10 else "#27ae60"
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, #2C3E50, #34495e); border-radius:12px; padding:1.5rem; text-align:center; color:white;">
+                <div style="font-size:0.8rem; opacity:0.8; text-transform:uppercase;">Alle-Tage-Modell</div>
+                <div style="font-size:2.5rem; font-weight:800;">{pred_g_y:.0f}</div>
+                <div style="font-size:0.85rem; opacity:0.8;">Bestellungen</div>
+                <div style="font-size:0.85rem; margin-top:0.5rem; color:{color_g}; font-weight:600;">
+                    Abweichung: {diff_g:+.0f} ({pct_g:+.1f}%)
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        if pred_wd_y is not None:
+            with col_tag:
+                diff_wd = pred_wd_y - actual_cnt
+                pct_wd = (diff_wd / max(actual_cnt, 1)) * 100
+                color_wd = "#e74c3c" if abs(pct_wd) > 20 else "#f39c12" if abs(pct_wd) > 10 else "#27ae60"
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, #C0392B, #e74c3c); border-radius:12px; padding:1.5rem; text-align:center; color:white;">
+                    <div style="font-size:0.8rem; opacity:0.8; text-transform:uppercase;">Nur-{WEEKDAY_NAMES[wd_y]}-Modell</div>
+                    <div style="font-size:2.5rem; font-weight:800;">{pred_wd_y:.0f}</div>
+                    <div style="font-size:0.85rem; opacity:0.8;">Bestellungen</div>
+                    <div style="font-size:0.85rem; margin-top:0.5rem; color:{color_wd}; font-weight:600;">
+                        Abweichung: {diff_wd:+.0f} ({pct_wd:+.1f}%)
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        st.divider()
+
+        # Bewertung
+        best_pred = pred_wd_y if pred_wd_y is not None else pred_g_y
+        best_name = f"Nur-{WEEKDAY_NAMES[wd_y]}-Modell" if pred_wd_y is not None else "Alle-Tage-Modell"
+        best_diff = abs(best_pred - actual_cnt)
+        best_pct = (best_diff / max(actual_cnt, 1)) * 100
+
+        if best_pct <= 10:
+            st.success(f"✅ Exzellente Vorhersage! Das {best_name} lag nur {best_diff:.0f} Bestellungen ({best_pct:.1f}%) daneben.")
+        elif best_pct <= 20:
+            st.warning(f"⚠️ Akzeptable Vorhersage. Das {best_name} lag {best_diff:.0f} Bestellungen ({best_pct:.1f}%) daneben.")
+        else:
+            st.error(f"❌ Grössere Abweichung. Das {best_name} lag {best_diff:.0f} Bestellungen ({best_pct:.1f}%) daneben.")
+
+        st.caption(f"Datenquelle: {actual['source']}")
+
 
 # ===== TAB 9: Prognose heute =====
 with tab9:
