@@ -7,6 +7,7 @@
 import json
 import ssl
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.request import urlopen, Request
 
@@ -21,25 +22,51 @@ LONGITUDE = 7.549342
 
 
 def fetch_from_api() -> pd.DataFrame:
-    """Holt tägliche Wetterdaten für Basel von der Open-Meteo Archive API."""
-    params = (
+    """Holt tägliche Wetterdaten für Basel von der Open-Meteo Archive API + Forecast API."""
+    # Archive API: bis vorgestern (sicherer Bereich)
+    end_archive = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+    params_archive = (
         f"latitude={LATITUDE}&longitude={LONGITUDE}"
-        f"&start_date=2023-01-01&end_date=2026-03-04"
+        f"&start_date=2023-01-01&end_date={end_archive}"
         f"&daily=temperature_2m_max,temperature_2m_min,temperature_2m_mean,"
         f"precipitation_sum,rain_sum,windspeed_10m_max,weathercode"
         f"&timezone=Europe%2FZurich"
     )
-    url = f"https://archive-api.open-meteo.com/v1/archive?{params}"
+    url_archive = f"https://archive-api.open-meteo.com/v1/archive?{params_archive}"
 
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
 
-    req = Request(url, headers={"User-Agent": "weather-pipeline/1.0"})
+    req = Request(url_archive, headers={"User-Agent": "weather-pipeline/1.0"})
     with urlopen(req, timeout=30, context=ctx) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+        data_archive = json.loads(resp.read().decode("utf-8"))
 
-    return _daily_to_df(data)
+    df_archive = _daily_to_df(data_archive)
+
+    # Forecast API: letzte Tage + heute (past_days=7 gibt vergangene Tage)
+    params_forecast = (
+        f"latitude={LATITUDE}&longitude={LONGITUDE}"
+        f"&daily=temperature_2m_max,temperature_2m_min,temperature_2m_mean,"
+        f"precipitation_sum,rain_sum,windspeed_10m_max,weathercode"
+        f"&timezone=Europe%2FZurich"
+        f"&past_days=7&forecast_days=1"
+    )
+    url_forecast = f"https://api.open-meteo.com/v1/forecast?{params_forecast}"
+
+    try:
+        req2 = Request(url_forecast, headers={"User-Agent": "weather-pipeline/1.0"})
+        with urlopen(req2, timeout=30, context=ctx) as resp2:
+            data_forecast = json.loads(resp2.read().decode("utf-8"))
+        df_forecast = _daily_to_df(data_forecast)
+
+        # Kombinieren: Archive + Forecast (ohne Duplikate)
+        df = pd.concat([df_archive, df_forecast], ignore_index=True)
+        df = df.drop_duplicates(subset=["weather_date"], keep="last").sort_values("weather_date").reset_index(drop=True)
+    except Exception:
+        df = df_archive
+
+    return df
 
 
 def json_to_dataframe(json_path: Path) -> pd.DataFrame:
