@@ -179,14 +179,16 @@ st.sidebar.markdown("## 🔍 Filter")
 st.sidebar.markdown("---")
 
 date_min = df_joined["weather_date"].min().date()
-date_max = df_joined["weather_date"].max().date()
+date_max_data = df_joined["weather_date"].max().date()
+date_today = datetime.now().date()
+date_max = max(date_max_data, date_today)
 
 st.sidebar.markdown("**Zeitraum**")
 col_von, col_bis = st.sidebar.columns(2)
 with col_von:
     date_start = st.date_input("Von", value=date_min, min_value=date_min, max_value=date_max, key="d_start")
 with col_bis:
-    date_end = st.date_input("Bis", value=date_max, min_value=date_min, max_value=date_max, key="d_end")
+    date_end = st.date_input("Bis", value=date_today, min_value=date_min, max_value=date_max, key="d_end")
 
 date_range = (date_start, date_end)
 
