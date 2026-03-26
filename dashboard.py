@@ -812,10 +812,10 @@ with tab10:
 
         st.divider()
 
-        # Grosser Vergleich
+        # Vergleich: Ist vs. Tagesmodell
         st.markdown("### 📊 Vergleich")
 
-        col_ist, col_global, col_tag = st.columns(3)
+        col_ist, col_tag = st.columns(2)
 
         with col_ist:
             st.markdown(f"""
@@ -824,21 +824,6 @@ with tab10:
                 <div style="font-size:2.5rem; font-weight:800;">{actual_cnt}</div>
                 <div style="font-size:0.85rem; opacity:0.8;">Bestellungen</div>
                 <div style="font-size:0.75rem; margin-top:0.5rem;">CHF {actual_rev:,.0f} Umsatz</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with col_global:
-            diff_g = pred_g_y - actual_cnt
-            pct_g = (diff_g / max(actual_cnt, 1)) * 100
-            color_g = "#e74c3c" if abs(pct_g) > 20 else "#f39c12" if abs(pct_g) > 10 else "#27ae60"
-            st.markdown(f"""
-            <div style="background: linear-gradient(135deg, #2C3E50, #34495e); border-radius:12px; padding:1.5rem; text-align:center; color:white;">
-                <div style="font-size:0.8rem; opacity:0.8; text-transform:uppercase;">Alle-Tage-Modell</div>
-                <div style="font-size:2.5rem; font-weight:800;">{pred_g_y:.0f}</div>
-                <div style="font-size:0.85rem; opacity:0.8;">Bestellungen</div>
-                <div style="font-size:0.85rem; margin-top:0.5rem; color:{color_g}; font-weight:600;">
-                    Abweichung: {diff_g:+.0f} ({pct_g:+.1f}%)
-                </div>
             </div>
             """, unsafe_allow_html=True)
 
