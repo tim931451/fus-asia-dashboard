@@ -766,8 +766,6 @@ def fetch_recent_order_counts(n_days=14):
     """Holt die täglichen Bestellzahlen der letzten n_days Tage aus der DB.
     Wird für lag_7 und rolling_mean_7 verwendet, damit diese immer aktuell sind."""
     try:
-        from dotenv import load_dotenv
-        load_dotenv()
         from db import REMOTE
         from sqlalchemy import text
 
@@ -817,10 +815,8 @@ def fetch_actual_orders(target_date_str):
     """
     target_date = pd.to_datetime(target_date_str).date()
 
-    # Versuch 1: DB
+    # Versuch 1: DB (nutzt bereits geladene REMOTE-Engine aus db.py)
     try:
-        from dotenv import load_dotenv
-        load_dotenv()
         from db import REMOTE
         from sqlalchemy import text
 
