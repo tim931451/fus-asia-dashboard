@@ -130,13 +130,14 @@ def _try_load_live():
         """), REMOTE)
         orders["weather_date"] = pd.to_datetime(orders["weather_date"])
 
-        # Wetter von Open-Meteo (Archiv + Forecast)
+        # Wetter von Open-Meteo: Archiv für Historik
         today = datetime.now().date()
+        archive_end = (today - timedelta(days=5)).isoformat()
         weather_url = (
             "https://archive-api.open-meteo.com/v1/archive"
             "?latitude=47.557117&longitude=7.549342"
             "&start_date=2023-01-01"
-            f"&end_date={today.isoformat()}"
+            f"&end_date={archive_end}"
             "&daily=temperature_2m_max,temperature_2m_min,temperature_2m_mean,"
             "precipitation_sum,rain_sum,windspeed_10m_max,weathercode"
             "&timezone=Europe/Zurich"
@@ -146,6 +147,28 @@ def _try_load_live():
         w = pd.DataFrame(resp.json()["daily"])
         w.rename(columns={"time": "weather_date"}, inplace=True)
         w["weather_date"] = pd.to_datetime(w["weather_date"])
+
+        # Forecast-API für die letzten Tage (Archiv hat Verzögerung)
+        try:
+            forecast_url = (
+                "https://api.open-meteo.com/v1/forecast"
+                "?latitude=47.557117&longitude=7.549342"
+                "&daily=temperature_2m_max,temperature_2m_min,temperature_2m_mean,"
+                "precipitation_sum,rain_sum,windspeed_10m_max,weathercode"
+                "&timezone=Europe/Zurich"
+                "&past_days=7&forecast_days=1"
+            )
+            resp2 = requests.get(forecast_url, timeout=10)
+            resp2.raise_for_status()
+            w2 = pd.DataFrame(resp2.json()["daily"])
+            w2.rename(columns={"time": "weather_date"}, inplace=True)
+            w2["weather_date"] = pd.to_datetime(w2["weather_date"])
+            # Nur Tage hinzufügen, die im Archiv fehlen
+            existing_dates = set(w["weather_date"])
+            w2 = w2[~w2["weather_date"].isin(existing_dates)]
+            w = pd.concat([w, w2], ignore_index=True).sort_values("weather_date")
+        except Exception:
+            pass
 
         # Join
         df = w.merge(orders, on="weather_date", how="inner")
@@ -703,9 +726,7 @@ def _predict_for_date(target_date, weather_row, models, model_meta, df_feat, sch
     is_pub = 1 if target_date in ch_hol else 0
     is_school = 1 if pd.Timestamp(target_date) in school_hols else 0
 
-    last_rows = df_feat.sort_values("date").tail(14)
-    lag_7 = float(last_rows["orders_cnt"].iloc[-7]) if len(last_rows) >= 7 else np.nan
-    roll_7 = float(last_rows["orders_cnt"].iloc[-7:].mean()) if len(last_rows) >= 7 else np.nan
+    lag_7, roll_7 = _compute_live_lags(df_feat)
 
     feat = {
         "temperature_2m_mean": float(weather_row.get("temperature_2m_mean", 0) or 0),
@@ -735,6 +756,54 @@ def _predict_for_date(target_date, weather_row, models, model_meta, df_feat, sch
         pred_weekday = max(0, float(models[wd_key].predict(X_wd)[0]))
 
     return pred_global, pred_weekday, wd, feat, feat_g
+
+
+# ---------------------------------------------------------------------------
+# Helper: Letzte N Tage Bestellungen aus DB für Lag-Features
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=3600)
+def fetch_recent_order_counts(n_days=14):
+    """Holt die täglichen Bestellzahlen der letzten n_days Tage aus der DB.
+    Wird für lag_7 und rolling_mean_7 verwendet, damit diese immer aktuell sind."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        from db import REMOTE
+        from sqlalchemy import text
+
+        result = pd.read_sql(
+            text("""
+                SELECT DATE(datum) AS order_date, COUNT(*) AS orders_cnt
+                FROM vu_fuboxeat_ab_2021
+                WHERE datum >= DATE_SUB(CURDATE(), INTERVAL :n DAY)
+                GROUP BY DATE(datum)
+                ORDER BY order_date
+            """),
+            REMOTE,
+            params={"n": n_days + 1},
+        )
+        if not result.empty:
+            result["order_date"] = pd.to_datetime(result["order_date"])
+            return result
+    except Exception:
+        pass
+    return None
+
+
+def _compute_live_lags(df_feat_fallback):
+    """Berechnet lag_7 und rolling_mean_7 aus Live-DB-Daten, Fallback auf df_feat."""
+    recent = fetch_recent_order_counts(14)
+    if recent is not None and len(recent) >= 7:
+        recent = recent.sort_values("order_date")
+        lag_7 = float(recent["orders_cnt"].iloc[-7])
+        roll_7 = float(recent["orders_cnt"].iloc[-7:].mean())
+        return lag_7, roll_7
+
+    # Fallback: statische Feature-Datei
+    last_rows = df_feat_fallback.sort_values("date").tail(14)
+    lag_7 = float(last_rows["orders_cnt"].iloc[-7]) if len(last_rows) >= 7 else np.nan
+    roll_7 = float(last_rows["orders_cnt"].iloc[-7:].mean()) if len(last_rows) >= 7 else np.nan
+    return lag_7, roll_7
 
 
 # ---------------------------------------------------------------------------
@@ -809,7 +878,35 @@ def fetch_weather_for_date(target_date_str):
     except Exception:
         pass
 
-    # Fallback: Open-Meteo Archive API
+    # Fallback 1: Open-Meteo Forecast API (hat aktuelle + letzte Tage)
+    try:
+        days_ago = (datetime.now().date() - target_date).days
+        if days_ago <= 7:
+            url = (
+                f"https://api.open-meteo.com/v1/forecast"
+                f"?latitude=47.557117&longitude=7.549342"
+                f"&daily=temperature_2m_mean,precipitation_sum,rain_sum,windspeed_10m_max,weathercode"
+                f"&timezone=Europe/Zurich"
+                f"&past_days={min(days_ago + 1, 7)}&forecast_days=1"
+            )
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()["daily"]
+            fdf = pd.DataFrame(data)
+            fdf["time"] = pd.to_datetime(fdf["time"])
+            row = fdf[fdf["time"].dt.date == target_date]
+            if not row.empty:
+                r = row.iloc[0]
+                return {
+                    "temperature_2m_mean": r["temperature_2m_mean"],
+                    "windspeed_10m_max": r["windspeed_10m_max"],
+                    "rain_sum": r["rain_sum"],
+                    "weathercode": r["weathercode"],
+                }
+    except Exception:
+        pass
+
+    # Fallback 2: Open-Meteo Archive API (für ältere Daten)
     try:
         url = (
             f"https://archive-api.open-meteo.com/v1/archive"
@@ -843,9 +940,7 @@ with tab10:
     weather_yest = fetch_weather_for_date(str(yesterday))
 
     if weather_yest is None:
-        st.error(f"Keine Wetterdaten für {yesterday} verfügbar.")
-    elif actual is None:
-        st.warning(f"Keine Bestelldaten für {yesterday} gefunden. Evtl. war das Restaurant geschlossen oder die Daten sind noch nicht verfügbar.")
+        st.error(f"Keine Wetterdaten für {yesterday} verfügbar. Bitte später erneut versuchen.")
     else:
         # Wetter anzeigen
         t_temp_y = float(weather_yest.get("temperature_2m_mean", 0) or 0)
@@ -864,58 +959,91 @@ with tab10:
             yesterday, weather_yest, models, model_meta, df_feat, school_hols
         )
 
-        actual_cnt = actual["orders_cnt"]
-        actual_rev = actual["orders_value_sum"]
-
         st.divider()
 
-        # Vergleich: Ist vs. Tagesmodell
-        st.markdown("### 📊 Vergleich")
+        if actual is not None:
+            # --- Ist-Daten vorhanden: Vergleich anzeigen ---
+            actual_cnt = actual["orders_cnt"]
+            actual_rev = actual["orders_value_sum"]
 
-        col_ist, col_tag = st.columns(2)
+            st.markdown("### 📊 Vergleich")
 
-        with col_ist:
-            st.markdown(f"""
-            <div style="background: linear-gradient(135deg, #27ae60, #2ecc71); border-radius:12px; padding:1.5rem; text-align:center; color:white;">
-                <div style="font-size:0.8rem; opacity:0.8; text-transform:uppercase;">Tatsächlich (Ist)</div>
-                <div style="font-size:2.5rem; font-weight:800;">{actual_cnt}</div>
-                <div style="font-size:0.85rem; opacity:0.8;">Bestellungen</div>
-                <div style="font-size:0.75rem; margin-top:0.5rem;">CHF {actual_rev:,.0f} Umsatz</div>
-            </div>
-            """, unsafe_allow_html=True)
+            col_ist, col_tag = st.columns(2)
 
-        if pred_wd_y is not None:
-            with col_tag:
-                diff_wd = pred_wd_y - actual_cnt
-                pct_wd = (diff_wd / max(actual_cnt, 1)) * 100
-                color_wd = "#e74c3c" if abs(pct_wd) > 20 else "#f39c12" if abs(pct_wd) > 10 else "#27ae60"
+            with col_ist:
                 st.markdown(f"""
-                <div style="background: linear-gradient(135deg, #C0392B, #e74c3c); border-radius:12px; padding:1.5rem; text-align:center; color:white;">
-                    <div style="font-size:0.8rem; opacity:0.8; text-transform:uppercase;">Nur-{WEEKDAY_NAMES[wd_y]}-Modell</div>
-                    <div style="font-size:2.5rem; font-weight:800;">{pred_wd_y:.0f}</div>
+                <div style="background: linear-gradient(135deg, #27ae60, #2ecc71); border-radius:12px; padding:1.5rem; text-align:center; color:white;">
+                    <div style="font-size:0.8rem; opacity:0.8; text-transform:uppercase;">Tatsächlich (Ist)</div>
+                    <div style="font-size:2.5rem; font-weight:800;">{actual_cnt}</div>
                     <div style="font-size:0.85rem; opacity:0.8;">Bestellungen</div>
-                    <div style="font-size:0.85rem; margin-top:0.5rem; color:{color_wd}; font-weight:600;">
-                        Abweichung: {diff_wd:+.0f} ({pct_wd:+.1f}%)
-                    </div>
+                    <div style="font-size:0.75rem; margin-top:0.5rem;">CHF {actual_rev:,.0f} Umsatz</div>
                 </div>
                 """, unsafe_allow_html=True)
 
-        st.divider()
+            if pred_wd_y is not None:
+                with col_tag:
+                    diff_wd = pred_wd_y - actual_cnt
+                    pct_wd = (diff_wd / max(actual_cnt, 1)) * 100
+                    color_wd = "#e74c3c" if abs(pct_wd) > 20 else "#f39c12" if abs(pct_wd) > 10 else "#27ae60"
+                    st.markdown(f"""
+                    <div style="background: linear-gradient(135deg, #C0392B, #e74c3c); border-radius:12px; padding:1.5rem; text-align:center; color:white;">
+                        <div style="font-size:0.8rem; opacity:0.8; text-transform:uppercase;">Nur-{WEEKDAY_NAMES[wd_y]}-Modell</div>
+                        <div style="font-size:2.5rem; font-weight:800;">{pred_wd_y:.0f}</div>
+                        <div style="font-size:0.85rem; opacity:0.8;">Bestellungen</div>
+                        <div style="font-size:0.85rem; margin-top:0.5rem; color:{color_wd}; font-weight:600;">
+                            Abweichung: {diff_wd:+.0f} ({pct_wd:+.1f}%)
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
-        # Bewertung
-        best_pred = pred_wd_y if pred_wd_y is not None else pred_g_y
-        best_name = f"Nur-{WEEKDAY_NAMES[wd_y]}-Modell" if pred_wd_y is not None else "Alle-Tage-Modell"
-        best_diff = abs(best_pred - actual_cnt)
-        best_pct = (best_diff / max(actual_cnt, 1)) * 100
+            st.divider()
 
-        if best_pct <= 10:
-            st.success(f"✅ Exzellente Vorhersage! Das {best_name} lag nur {best_diff:.0f} Bestellungen ({best_pct:.1f}%) daneben.")
-        elif best_pct <= 20:
-            st.warning(f"⚠️ Akzeptable Vorhersage. Das {best_name} lag {best_diff:.0f} Bestellungen ({best_pct:.1f}%) daneben.")
+            # Bewertung
+            best_pred = pred_wd_y if pred_wd_y is not None else pred_g_y
+            best_name = f"Nur-{WEEKDAY_NAMES[wd_y]}-Modell" if pred_wd_y is not None else "Alle-Tage-Modell"
+            best_diff = abs(best_pred - actual_cnt)
+            best_pct = (best_diff / max(actual_cnt, 1)) * 100
+
+            if best_pct <= 10:
+                st.success(f"✅ Exzellente Vorhersage! Das {best_name} lag nur {best_diff:.0f} Bestellungen ({best_pct:.1f}%) daneben.")
+            elif best_pct <= 20:
+                st.warning(f"⚠️ Akzeptable Vorhersage. Das {best_name} lag {best_diff:.0f} Bestellungen ({best_pct:.1f}%) daneben.")
+            else:
+                st.error(f"❌ Grössere Abweichung. Das {best_name} lag {best_diff:.0f} Bestellungen ({best_pct:.1f}%) daneben.")
+
+            st.caption(f"Datenquelle: {actual['source']}")
+
         else:
-            st.error(f"❌ Grössere Abweichung. Das {best_name} lag {best_diff:.0f} Bestellungen ({best_pct:.1f}%) daneben.")
+            # --- Keine Ist-Daten: Nur Prognose anzeigen ---
+            st.warning(
+                f"Keine Bestelldaten für {yesterday} in der Datenbank gefunden. "
+                "Evtl. war das Restaurant geschlossen oder die Daten sind noch nicht erfasst."
+            )
 
-        st.caption(f"Datenquelle: {actual['source']}")
+            st.markdown("### 🤖 Prognose (ohne Ist-Vergleich)")
+
+            col_g, col_wd = st.columns(2)
+
+            with col_g:
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, #2C3E50, #34495e); border-radius:12px; padding:1.5rem; text-align:center; color:white;">
+                    <div style="font-size:0.8rem; opacity:0.8; text-transform:uppercase;">Alle-Tage-Modell</div>
+                    <div style="font-size:2.5rem; font-weight:800;">{pred_g_y:.0f}</div>
+                    <div style="font-size:0.85rem; opacity:0.8;">Bestellungen (Prognose)</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            if pred_wd_y is not None:
+                with col_wd:
+                    st.markdown(f"""
+                    <div style="background: linear-gradient(135deg, #C0392B, #e74c3c); border-radius:12px; padding:1.5rem; text-align:center; color:white;">
+                        <div style="font-size:0.8rem; opacity:0.8; text-transform:uppercase;">Nur-{WEEKDAY_NAMES[wd_y]}-Modell</div>
+                        <div style="font-size:2.5rem; font-weight:800;">{pred_wd_y:.0f}</div>
+                        <div style="font-size:0.85rem; opacity:0.8;">Bestellungen (Prognose)</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            st.caption("Sobald die Bestelldaten in der DB verfügbar sind, wird der Vergleich automatisch angezeigt.")
 
 
 # ===== TAB 9: Prognose heute =====
@@ -978,9 +1106,7 @@ with tab9:
             t_is_pub = 1 if today in ch_hol_today else 0
             t_is_school = 1 if pd.Timestamp(today) in school_hols else 0
 
-            last_rows_t = df_feat.sort_values("date").tail(14)
-            t_lag_7 = float(last_rows_t["orders_cnt"].iloc[-7]) if len(last_rows_t) >= 7 else np.nan
-            t_roll_7 = float(last_rows_t["orders_cnt"].iloc[-7:].mean()) if len(last_rows_t) >= 7 else np.nan
+            t_lag_7, t_roll_7 = _compute_live_lags(df_feat)
 
             # Global prediction
             feat_today_g = {
@@ -1047,13 +1173,17 @@ with tab9:
             c3.metric("Differenz", f"{pred_t_rain - pred_t_dry:+.1f}")
 
             # Data freshness
-            last_date_t = df_feat["date"].max().date()
-            days_old_t = (today - last_date_t).days
-            if days_old_t > 3:
-                st.warning(
-                    f"Die Daten sind {days_old_t} Tage alt (letzter Eintrag: {last_date_t}). "
-                    "Lag-Features könnten ungenau sein."
-                )
+            recent_db = fetch_recent_order_counts(14)
+            if recent_db is None or recent_db.empty:
+                last_date_t = df_feat["date"].max().date()
+                days_old_t = (today - last_date_t).days
+                if days_old_t > 3:
+                    st.warning(
+                        f"⚠️ Kein Zugriff auf Live-DB. CSV-Daten sind {days_old_t} Tage alt "
+                        f"(letzter Eintrag: {last_date_t}). Lag-Features könnten ungenau sein."
+                    )
+            else:
+                st.caption("✅ Lag-Features basieren auf Live-Datenbank-Daten.")
 
 # ===== TAB 7: Prognose morgen =====
 with tab7:
@@ -1115,10 +1245,8 @@ with tab7:
             is_pub = 1 if tomorrow in ch_hol else 0
             is_school = 1 if pd.Timestamp(tomorrow) in school_hols else 0
 
-            # Lag features from historical data
-            last_rows = df_feat.sort_values("date").tail(14)
-            lag_7 = float(last_rows["orders_cnt"].iloc[-7]) if len(last_rows) >= 7 else np.nan
-            roll_7 = float(last_rows["orders_cnt"].iloc[-7:].mean()) if len(last_rows) >= 7 else np.nan
+            # Lag features from live DB data
+            lag_7, roll_7 = _compute_live_lags(df_feat)
 
             # Global model prediction
             feat_global = {
@@ -1189,10 +1317,14 @@ with tab7:
             c3.metric("Differenz", f"{pred_rain - pred_dry:+.1f}")
 
             # Data freshness warning
-            last_date = df_feat["date"].max().date()
-            days_old = (tomorrow - last_date).days
-            if days_old > 3:
-                st.warning(
-                    f"Die Daten sind {days_old} Tage alt (letzter Eintrag: {last_date}). "
-                    "Lag-Features könnten ungenau sein. Bitte Pipeline neu ausführen."
-                )
+            recent_db_m = fetch_recent_order_counts(14)
+            if recent_db_m is None or recent_db_m.empty:
+                last_date = df_feat["date"].max().date()
+                days_old = (tomorrow - last_date).days
+                if days_old > 3:
+                    st.warning(
+                        f"⚠️ Kein Zugriff auf Live-DB. CSV-Daten sind {days_old} Tage alt "
+                        f"(letzter Eintrag: {last_date}). Lag-Features könnten ungenau sein."
+                    )
+            else:
+                st.caption("✅ Lag-Features basieren auf Live-Datenbank-Daten.")
